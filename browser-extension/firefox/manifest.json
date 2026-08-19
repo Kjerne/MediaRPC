@@ -1,0 +1,44 @@
+{
+  "manifest_version": 2,
+  "name": "MediaRPC Netflix Bridge",
+  "version": "0.5.2",
+  "description": "Sends Netflix playback state to the local MediaRPC tray app.",
+  "author": "Kjerne",
+  "icons": {
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png",
+    "128": "icons/icon-128.png"
+  },
+  "permissions": [
+    "http://127.0.0.1:5678/*",
+    "https://www.netflix.com/*",
+    "tabs"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.netflix.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "mediarpc-netflix-bridge@kjerne",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ],
+        "optional": []
+      }
+    }
+  }
+}
