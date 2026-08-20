@@ -1,6 +1,6 @@
-# Secrets / local state — never commit
+# Secrets / local state - never commit
 .env
-plex_state.json
+plezy_state.json
 image_cache.json
 *.log
 

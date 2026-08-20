@@ -4,6 +4,9 @@ echo MediaRPC - Setup and Build
 echo ================================================
 echo.
 
+REM Run from the repo root (parent of this script's mediarpc\ folder).
+cd /d "%~dp0.."
+
 echo [0/3] Updating pip...
 python -m pip install --upgrade pip setuptools wheel
 
@@ -29,7 +32,7 @@ echo [2/3] Building MediaRPC executable...
 echo ================================================
 echo.
 
-py -m PyInstaller --onefile --noconsole --name MediaRPC --icon=MediaRPC_Active.ico --add-data "MediaRPC_Active.ico;." --add-data "MediaRPC_Inactive.ico;." mediarpc.py
+py -m PyInstaller --onefile --noconsole --name MediaRPC --icon=mediarpc/Images/MediaRPC_Active.ico --add-data "mediarpc/Images/MediaRPC_Active.ico;Images" --add-data "mediarpc/Images/MediaRPC_Inactive.ico;Images" mediarpc/run_mediarpc.py
 
 if errorlevel 1 (
     echo.
@@ -44,15 +47,16 @@ echo [3/3] Copying files to dist folder...
 echo ================================================
 echo.
 
-if exist .env (
+REM .env may live in mediarpc\ (dev layout) or at the root (distribution layout).
+if exist mediarpc\.env (
+    copy mediarpc\.env dist\.env >nul
+    echo [OK] .env copied
+) else if exist .env (
     copy .env dist\.env >nul
     echo [OK] .env copied
 ) else (
     echo [WARNING] .env not found! Copy .env.example to .env and fill it in.
 )
-
-copy MediaRPC_Active.ico dist\MediaRPC_Active.ico >nul 2>&1
-copy MediaRPC_Inactive.ico dist\MediaRPC_Inactive.ico >nul 2>&1
 
 echo.
 echo ================================================

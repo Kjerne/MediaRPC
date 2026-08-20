@@ -1,4 +1,4 @@
-const BRIDGE_URL = "http://127.0.0.1:5678/netflix";
+const BRIDGE_URL = "http://127.0.0.1:5678/bridge";
 const HEARTBEAT_MS = 5000;
 const STALE_AFTER_MS = 60 * 60 * 1000;
 // How long to wait before forwarding an active:false to Python.
