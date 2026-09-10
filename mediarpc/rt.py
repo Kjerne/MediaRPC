@@ -108,6 +108,7 @@ SERVICE_ENABLED = {
     "netflix": os.getenv("NETFLIX_ENABLED", "true").lower() == "true",
     "disney":  os.getenv("DISNEY_ENABLED",  "true").lower() == "true",
     "tv2":     os.getenv("TV2_ENABLED",     "true").lower() == "true",
+    "silo":    os.getenv("SILO_ENABLED",    "true").lower() == "true",
 }
 
 AUTO_PAUSE_ENABLED = os.getenv("AUTO_PAUSE_WHEN_CLOSED", "true").lower() == "true"
@@ -196,11 +197,14 @@ SERVICE_LABELS = {
     "netflix": "Netflix",
     "disney": "Disney+",
     "tv2": "TV 2 Play",
+    "silo": "Silo",
 }
 SERVICE_LOGOS = {
     "netflix": NETFLIX_LOGO_URL,
     "disney": None,
     "tv2": None,
+    # Self-hosted server, no fixed brand image - fall back to the TMDB poster.
+    "silo": None,
 }
 
 RPC_HEARTBEAT       = int(os.getenv("RPC_HEARTBEAT", 15))

@@ -10,6 +10,8 @@ build/
 *.spec
 __pycache__/
 *.pyc
+# Packed browser extension - users build/load it from browser-extension/firefox/
+*.xpi
 
 # OS / editor
 .DS_Store
