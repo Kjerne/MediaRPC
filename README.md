@@ -4,10 +4,10 @@
 
 # MediaRPC
 
-Discord Rich Presence for your media - **Emby**, **browser streaming** (Netflix, Disney+, TV 2 Play), and **Plezy** - from a single lightweight Windows tray app. Shows what you're watching with title, episode, live progress bar, poster art, ratings, and buttons.
+Discord Rich Presence for your media - **Emby**, **browser streaming** (Netflix, Disney+, TV 2 Play, Silo), and **Plezy** - from a single lightweight Windows tray app. Shows what you're watching with title, episode, live progress bar, poster art, ratings, and buttons.
 
 - **Emby** - real-time via WebSocket, your session only.
-- **Browser bridge** - a Firefox extension scrapes Netflix / Disney+ / TV 2 Play playback and forwards it locally.
+- **Browser bridge** - a Firefox extension scrapes Netflix / Disney+ / TV 2 Play / Silo playback and forwards it locally.
 - **Plezy** - reads live playback straight from Plezy's mpv player (works even when you are **not** the Plex server owner). Handles both Plex- and Emby-backed streams.
 
 Priority when several are active: **Emby (playing) → Plezy → Browser → Emby (browsing) → idle**.
@@ -56,9 +56,13 @@ Copy `token` into `TOKEN` and `userId` into `EMBY_USER_ID` in your `.env`.
 
 ## Browser bridge extension (Firefox)
 
-The extension scrapes Netflix / Disney+ / TV 2 Play playback and posts it to the
-app at `http://127.0.0.1:5678/bridge` (matches `BRIDGE_PORT`). If you change the
-port, update `background.js` and the manifest permission to match.
+The extension scrapes Netflix / Disney+ / TV 2 Play / Silo playback and posts it
+to the app at `http://127.0.0.1:5678/bridge` (matches `BRIDGE_PORT`). If you change
+the port, update `background.js` and the manifest permission to match.
+
+**Silo** is a self-hosted media server web UI - its hostname is server-dependent
+but always starts with `silo.` (e.g. `silo.example.com`). The `silo.js` content
+script activates on any such host and stays inert everywhere else.
 
 ### Option A - Install from Mozilla Add-ons (recommended, easiest)
 
@@ -82,8 +86,8 @@ Prefer to build/sign your own instead of using the listing:
 
 1. Create an account at [addons.mozilla.org](https://addons.mozilla.org/developers/).
 2. **Submit a New Add-on** → choose **On your own site** (unlisted / self-distribution).
-3. Upload `browser-extension/mediarpc-browser-bridge.xpi` (or zip the
-   `browser-extension/firefox/` folder yourself).
+3. Zip the `browser-extension/firefox/` folder into an `.xpi` (see
+   [Rebuilding the .xpi](#rebuilding-the-xpi) below) and upload that.
 4. Download the **signed `.xpi`** Mozilla returns.
 5. Install it: Firefox → `about:addons` → gear ⚙ → **Install Add-on From File** → pick the signed `.xpi`.
 
@@ -99,7 +103,7 @@ After editing files in `browser-extension/firefox/`, repack:
 
 ```bash
 cd browser-extension/firefox
-zip -r ../mediarpc-browser-bridge.xpi manifest.json background.js netflix.js disneyplus.js tv2.js icons
+zip -r ../mediarpc-browser-bridge.xpi manifest.json background.js netflix.js disneyplus.js tv2.js silo.js icons
 ```
 
 ## Plezy
@@ -116,7 +120,7 @@ Restart Plezy. MediaRPC then reads live position/pause from mpv and resolves tit
 
 All settings live in `.env` - see [`.env.example`](.env.example) for the full list. Highlights:
 
-- **Sources**: `EMBY_ENABLED`, `PLEZY_ENABLED` (+ `PLEZY_PLEX_ENABLED` / `PLEZY_EMBY_ENABLED`), `BRIDGE_ENABLED` (+ `NETFLIX_ENABLED` / `DISNEY_ENABLED` / `TV2_ENABLED`).
+- **Sources**: `EMBY_ENABLED`, `PLEZY_ENABLED` (+ `PLEZY_PLEX_ENABLED` / `PLEZY_EMBY_ENABLED`), `BRIDGE_ENABLED` (+ `NETFLIX_ENABLED` / `DISNEY_ENABLED` / `TV2_ENABLED` / `SILO_ENABLED`).
 - **Ratings**: `RATING_ORDER=emby,tmdb,omdb,critic` - reorder or drop sources.
 - **Buttons**: `RPC_BUTTONS=letterboxd,serializd` - also supports `trakt`, `imdb`, `tmdb`, or `Label|https://url`.
 - **Behaviour**: `UPDATE_INTERVAL`, `AUTO_PAUSE_WHEN_CLOSED`, `BROWSING_ENABLED`, `DEBUG`, plus advanced timing knobs.
