@@ -13,9 +13,14 @@ from . import metadata
 from . import tray
 
 
-def _mpv_ipc_get(props):
-    """Query mpv properties over Plezy's Windows named pipe.
-    Returns {prop: value} or None if the pipe isn't there (Plezy not playing)."""
+_k32 = None
+
+
+def _kernel32():
+    """kernel32 with the pipe-API signatures bound. Built once, not per poll."""
+    global _k32
+    if _k32 is not None:
+        return _k32
     import ctypes
     from ctypes import wintypes
     k = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -26,6 +31,24 @@ def _mpv_ipc_get(props):
                             ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
     k.ReadFile.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
                            ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+    k.PeekNamedPipe.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                                ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+                                ctypes.POINTER(wintypes.DWORD)]
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    _k32 = k
+    return k
+
+
+def _mpv_ipc_get(props):
+    """Query mpv properties over Plezy's Windows named pipe.
+    Returns {prop: value} or None if the pipe isn't there (Plezy not playing).
+
+    Reads are gated on PeekNamedPipe: ReadFile on this synchronous pipe blocks
+    until data arrives, so without the peek a stalled mpv would hang the whole
+    presence loop forever instead of timing out after 2 s per property."""
+    import ctypes
+    from ctypes import wintypes
+    k = _kernel32()
     GENERIC_READ = 0x80000000
     GENERIC_WRITE = 0x40000000
     OPEN_EXISTING = 3
@@ -35,18 +58,27 @@ def _mpv_ipc_get(props):
     if h == INVALID or not h:
         return None
     out = {}
+    chunk = ctypes.create_string_buffer(8192)
+    deadline = time.time() + 2  # whole poll, not per property
     try:
         buf = b""
         for i, p in enumerate(props, 1):
             msg = json.dumps({"command": ["get_property", p], "request_id": i}).encode() + b"\n"
             wr = wintypes.DWORD(0)
-            k.WriteFile(h, msg, len(msg), ctypes.byref(wr), None)
-            end = time.time() + 2
+            if not k.WriteFile(h, msg, len(msg), ctypes.byref(wr), None):
+                break  # pipe broken (mpv exited mid-poll)
+            end = deadline
             val = None
             while time.time() < end:
-                chunk = ctypes.create_string_buffer(8192)
+                avail = wintypes.DWORD(0)
+                if not k.PeekNamedPipe(h, None, 0, None, ctypes.byref(avail), None):
+                    end = 0  # pipe broken
+                    break
+                if not avail.value:
+                    time.sleep(0.02)
+                    continue
                 rd = wintypes.DWORD(0)
-                ok = k.ReadFile(h, chunk, 8192, ctypes.byref(rd), None)
+                ok = k.ReadFile(h, chunk, min(8192, avail.value), ctypes.byref(rd), None)
                 if ok and rd.value:
                     buf += chunk.raw[:rd.value]
                     matched = False
@@ -212,6 +244,11 @@ def _plezy_metadata_for_part(part_id):
     if part_id in rt.plezy_part_cache:
         rt.plezy_part_cache.move_to_end(part_id)
         return rt.plezy_part_cache[part_id]
+    # Negative cache: an unresolved part would otherwise re-copy Plezy's whole DB
+    # on every 3 s poll until Plezy writes the api_cache row.
+    missed_at = rt.plezy_part_miss.get(part_id)
+    if missed_at and time.time() - missed_at < rt.PLEZY_PART_MISS_TTL:
+        return None
     db = _plezy_db_path()
     if not db:
         return None
@@ -228,8 +265,13 @@ def _plezy_metadata_for_part(part_id):
                 pass
         con = sqlite3.connect(tmp, timeout=2)
         try:
-            for (data,) in con.execute("SELECT data FROM api_cache ORDER BY cached_at DESC"):
-                if not data or part_id not in data:
+            # Filter in SQLite so Python only json-parses candidate rows. part_id is
+            # all digits (regex-extracted), so it needs no LIKE escaping.
+            for (data,) in con.execute(
+                "SELECT data FROM api_cache WHERE data LIKE ? ORDER BY cached_at DESC",
+                (f"%{part_id}%",),
+            ):
+                if not data:
                     continue
                 try:
                     j = json.loads(data)
@@ -256,6 +298,11 @@ def _plezy_metadata_for_part(part_id):
         if len(rt.plezy_part_cache) >= rt.CACHE_MAX_SIZE:
             rt._evict_oldest(rt.plezy_part_cache)
         rt.plezy_part_cache[part_id] = meta
+        rt.plezy_part_miss.pop(part_id, None)
+    else:
+        if len(rt.plezy_part_miss) >= rt.CACHE_MAX_SIZE:
+            rt._evict_oldest(rt.plezy_part_miss)
+        rt.plezy_part_miss[part_id] = time.time()
     return meta
 
 
@@ -351,6 +398,7 @@ def get_plezy_activity():
         item = _emby_item_for_plezy(emby_id)
         if item:
             activity = _plezy_emby_activity(item, props)
+            activity["_polled_at"] = now
             rt._plezy_cached_activity = activity
             return activity
         # Metadata unavailable - fall through to the generic Plex handling below.
@@ -421,6 +469,7 @@ def get_plezy_activity():
         "tmdb_poster": meta.get("poster"),
         "tmdb_id": meta.get("tmdb_id"),
         "rating_key": md.get("ratingKey") or part,
+        "_polled_at": now,
     }
     rt._plezy_cached_activity = activity
     return activity
@@ -460,10 +509,25 @@ def update_plezy_rpc(activity):
         rt.last_plezy_ratingkey = rk
         rt.last_plezy_paused    = paused
 
+        # mpv is polled every PLEZY_POLL_INTERVAL but this runs every 2 s tick, so
+        # the cached position is stale. Extrapolate from the poll time, then keep
+        # the previous start/end unless the item/pause changed or playback drifted
+        # (seek). Recomputing every tick made start wobble by 1-2 s, changing the
+        # payload signature each tick and flooding Discord's 5/20 s cap.
+        now = time.time()
+        if not paused:
+            position += max(0.0, now - activity.get("_polled_at", now))
         if not paused and duration > 0:
-            start = int(time.time() - position)
-            end   = int(time.time() + max(10, duration - position))
+            drift = (abs((now - rt.last_plezy_start) - position)
+                     if rt.last_plezy_start is not None else None)
+            if item_changed or pause_changed or drift is None or drift > 3:
+                rt.last_plezy_start = int(now - position)
+                rt.last_plezy_end   = int(now + max(10, duration - position))
+            start = rt.last_plezy_start
+            end   = rt.last_plezy_end
         else:
+            rt.last_plezy_start = None
+            rt.last_plezy_end   = None
             start = None
             end   = None
 

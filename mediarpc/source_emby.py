@@ -124,8 +124,10 @@ def is_emby_app_running():
         found_processes = []
         for proc in psutil.process_iter(['name']):
             try:
-                proc_name = proc.info['name'].lower()
-                if any(emby_name in proc_name for emby_name in emby_process_names):
+                # name can be None for some system processes; don't let that
+                # bubble out to the optimistic "assume running" error path.
+                proc_name = (proc.info['name'] or "").lower()
+                if proc_name and any(emby_name in proc_name for emby_name in emby_process_names):
                     found_processes.append(proc.info['name'])
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
@@ -194,8 +196,15 @@ def get_reconciled_sessions():
             return fresh_sessions
         return sessions
 
+    # No live WebSocket: HTTP is the only feed. The loop may tick every 2 s (for
+    # Plezy/browser), so throttle /Sessions to the configured INTERVAL and serve
+    # the last HTTP result in between.
+    if now - rt.last_http_reconcile < rt.INTERVAL:
+        return list(rt.http_sessions) if rt.http_sessions is not None else []
+
     fresh_sessions = fetch_sessions()
     rt.last_http_reconcile = now
+    rt.http_sessions = fresh_sessions
     if fresh_sessions is not None:
         with rt.state_lock:
             rt.current_sessions = fresh_sessions
@@ -402,13 +411,17 @@ def update_rpc_browsing(session):
 
     try:
         client = session.get("Client", "Unknown")
+        large_image = rt.EMBY_LOGO_URL if rt.EMBY_LOGO_URL else "emby"
 
-        rt.RPC.update(
+        # Same rate-limit guard as playback: the browsing payload is static, so
+        # this pushes once and then only on the heartbeat.
+        discord_rpc.push_presence(
+            ("emby-browsing", client, large_image),
             name="Emby",
             activity_type=3,  # "Watching Emby"
             details="Browsing Emby Library",
             state=f"Using {client}",
-            large_image=rt.EMBY_LOGO_URL if rt.EMBY_LOGO_URL else "emby",
+            large_image=large_image,
             large_text="Browsing Emby",
             buttons=discord_rpc.build_buttons()
         )

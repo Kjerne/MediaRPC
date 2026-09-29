@@ -62,39 +62,53 @@ class Presence(PyPresence):
         if buttons:
             activity["buttons"] = buttons
 
-        try:
-            self.send_data(1, {
-                "cmd": "SET_ACTIVITY",
-                "args": {
-                    "pid": os.getpid(),
-                    "activity": activity
-                },
-                "nonce": str(time.time())
-            })
-        except Exception:
-            super().update(**kwargs)
+        # No fallback to super().update(): it doesn't accept activity_type/name/
+        # paused and would raise a TypeError that hides the real IPC error. Let the
+        # caller's handler see the original exception and trigger a health check.
+        self.send_data(1, {
+            "cmd": "SET_ACTIVITY",
+            "args": {
+                "pid": os.getpid(),
+                "activity": activity
+            },
+            "nonce": str(time.time())
+        })
 
 
 def connect_rpc():
 
-    try:
-        if rt.RPC:
-            try:
-                rt.RPC.close()
-            except Exception:
-                pass
+    with rt.rpc_lock:
+        try:
+            if rt.RPC:
+                try:
+                    rt.RPC.close()
+                except Exception:
+                    pass
 
-        rt.RPC = Presence(rt.CLIENT_ID)
-        rt.RPC.connect()
-        rt.log("Connected to Discord RPC")
-        rt.last_rpc_success  = time.time()
-        rt.reconnect_attempts = 0
-        return True
+            rt.RPC = Presence(rt.CLIENT_ID)
+            rt.RPC.connect()
+            rt.log("Connected to Discord RPC")
+            rt.last_rpc_success  = time.time()
+            rt.reconnect_attempts = 0
+            return True
 
-    except Exception as e:
-        rt.log(f"Discord connection failed: {e}")
-        rt.reconnect_attempts += 1
-        return False
+        except Exception as e:
+            rt.log(f"Discord connection failed: {e}")
+            rt.reconnect_attempts += 1
+            return False
+
+
+def safe_clear():
+    """Clear presence under the RPC lock; swallows errors. Returns True on success."""
+    with rt.rpc_lock:
+        if not rt.RPC:
+            return False
+        try:
+            rt.RPC.clear()
+            return True
+        except Exception as e:
+            rt.debug(f"RPC clear failed: {e}")
+            return False
 
 
 def check_rpc_health():
@@ -137,6 +151,16 @@ def refresh_rpc(icon=None, item=None):
     rt.last_http_reconcile      = 0
     rt.last_pushed_payload      = None
     rt.last_push_time           = 0.0
+    # Browser + Plezy timer state too, so a manual refresh fully re-renders them.
+    rt.last_netflix_title       = None
+    rt.last_netflix_subtitle    = None
+    rt.last_netflix_paused      = False
+    rt.last_netflix_start       = None
+    rt.last_netflix_end         = None
+    rt.last_plezy_ratingkey     = None
+    rt.last_plezy_paused        = None
+    rt.last_plezy_start         = None
+    rt.last_plezy_end           = None
     connect_rpc()
 
 
@@ -179,11 +203,8 @@ def clear_for_change(changed):
     old one. No-op when nothing changed."""
     if not changed:
         return
-    try:
-        rt.RPC.clear()
+    if safe_clear():
         time.sleep(rt.CLEAR_SETTLE)
-    except Exception:
-        pass
     rt.last_pushed_payload = None
 
 
@@ -194,7 +215,10 @@ def push_presence(payload_sig, **update_kwargs):
     Returns True if an update was sent."""
     now = time.time()
     if payload_sig != rt.last_pushed_payload or now - rt.last_push_time > rt.RPC_HEARTBEAT:
-        rt.RPC.update(**update_kwargs)
+        with rt.rpc_lock:
+            if not rt.RPC:
+                return False
+            rt.RPC.update(**update_kwargs)
         rt.last_pushed_payload = payload_sig
         rt.last_push_time      = now
         return True

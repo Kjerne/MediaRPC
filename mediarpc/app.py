@@ -14,13 +14,21 @@ from . import tray
 
 
 def validate_config():
-    """Check all required .env keys are present. Exit with a clear message if not."""
-    required = {
-        "EMBY_SERVER":       rt.SERVER,
-        "TOKEN":             rt.TOKEN,
-        "DISCORD_CLIENT_ID": rt.CLIENT_ID,
-        "EMBY_USER_ID":      rt.USER_ID,
+    """Check all required .env keys are present. Exit with a clear message if not.
+
+    Emby keys are only required for the native Emby source, so a Plezy/browser-only
+    setup (EMBY_ENABLED=false) can run without them. Plezy's Emby backend degrades
+    to generic Plex-style output when they're missing."""
+    required = {"DISCORD_CLIENT_ID": rt.CLIENT_ID}
+    emby_keys = {
+        "EMBY_SERVER":  rt.SERVER,
+        "TOKEN":        rt.TOKEN,
+        "EMBY_USER_ID": rt.USER_ID,
     }
+    if rt.EMBY_ENABLED:
+        required.update(emby_keys)
+    elif rt.PLEZY_ENABLED and rt.PLEZY_EMBY_ENABLED and not all(emby_keys.values()):
+        rt.log("  ⚠ Emby keys incomplete - Plezy's Emby backend will show without metadata")
     optional = {
         "IMGBB_KEY": rt.IMGBB_KEY,
         "OMDB_KEY":  rt.OMDB_KEY,
@@ -66,6 +74,22 @@ def tooltip_heartbeat():
                 tray.set_tooltip("MediaRPC - Idle")
 
 
+def _leave_clear():
+    """Clear Discord when switching away from a non-empty source. Also nulls the
+    pushed-payload signature so coming back to the same content re-pushes at once
+    instead of waiting out the heartbeat."""
+    if rt.last_mode not in (None, "idle"):
+        if discord_rpc.safe_clear():
+            time.sleep(rt.CLEAR_SETTLE)
+    rt.last_pushed_payload = None
+
+
+def _idle_tick():
+    """Loop sleep: 2 s whenever a fast source could start at any moment (WS-fed
+    Emby, Plezy's mpv pipe, the browser bridge); otherwise the HTTP poll interval."""
+    return 2 if (rt.ws_connected or rt.PLEZY_ENABLED or rt.BRIDGE_ENABLED) else rt.INTERVAL
+
+
 def rpc_loop():
 
     emby_was_running = True
@@ -78,17 +102,6 @@ def rpc_loop():
             continue
 
         try:
-            sessions = source_emby.get_reconciled_sessions()
-
-            def _leave_clear():
-                # Clear Discord when switching away from a non-empty source.
-                if rt.RPC and rt.last_mode is not None:
-                    try:
-                        rt.RPC.clear()
-                        time.sleep(0.5)
-                    except Exception as e:
-                        rt.log(f"Clear on mode switch failed: {e}")
-
             # ---- Priority: Emby (playing) > Plezy > Netflix > Emby (browsing) > idle ----
 
             # Emby auto-pause: when the local Emby app isn't running we skip Emby
@@ -103,6 +116,10 @@ def rpc_loop():
                     rt.log("Emby app closed")
                 emby_was_running = emby_running
                 emby_allowed = emby_running
+
+            # Only hit Emby when its source can actually be shown - no /Sessions
+            # polling while Emby is disabled or the local app is closed.
+            sessions = source_emby.get_reconciled_sessions() if emby_allowed else []
 
             # 1. EMBY playing (my session, or held paused session)
             session = None
@@ -177,32 +194,30 @@ def rpc_loop():
                 rt.last_mode = "browsing"
                 source_emby.update_rpc_browsing(browsing_session)
             else:
-                # 5. Idle - nothing playing anywhere
-                if rt.RPC:
-                    try:
-                        rt.RPC.clear()
-                    except Exception as e:
-                        rt.log(f"RPC clear failed: {e}")
+                # 5. Idle - nothing playing anywhere. Clear once on the transition
+                # (not every tick - each clear is a Discord IPC round trip).
+                if rt.last_mode != "idle":
+                    if rt.RPC and not discord_rpc.safe_clear():
                         discord_rpc.check_rpc_health()
+                    rt.last_pushed_payload      = None
+                    rt.last_item_id             = None
+                    rt.last_start               = None
+                    rt.last_end                 = None
+                    rt.last_paused              = False
+                    rt.last_paused_session      = None
+                    rt.last_paused_session_time = 0
+                    rt.last_mode                = "idle"
+                # Cheap (tray skips unchanged values); tooltip tracks Emby app state.
                 tray.set_icon(True)
                 tray.set_tooltip("MediaRPC - App not running" if not emby_allowed else "MediaRPC")
-
-                rt.last_item_id             = None
-                rt.last_start               = None
-                rt.last_end                 = None
-                rt.last_mode                = None
-                rt.last_paused              = False
-                rt.last_paused_session      = None
-                rt.last_paused_session_time = 0
 
         except Exception as e:
             rt.log(f"Loop error: {e}")
             discord_rpc.check_rpc_health()
 
-        # When WebSocket feeds us real-time data we only need the loop to
-        # rate-limit Discord updates - a 2 s tick is plenty.
-        # Without WebSocket, respect the full polling interval.
-        time.sleep(2 if rt.ws_connected else rt.INTERVAL)
+        # WS-fed Emby / Plezy / browser: a 2 s tick is plenty (push_presence
+        # rate-limits Discord). Pure HTTP polling respects the full interval.
+        time.sleep(_idle_tick())
 
 
 def _api_selftest():

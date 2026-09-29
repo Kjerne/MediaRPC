@@ -10,21 +10,69 @@ from . import metadata
 from . import tray
 
 
+# Largest POST body we accept. Real payloads are a few hundred bytes.
+BRIDGE_MAX_BODY = 64 * 1024
+
+# Origins allowed to talk to the bridge. The Firefox extension's background page
+# sends moz-extension://<uuid>; curl/local tools send no Origin at all. Any web
+# page sends its own https:// origin and is rejected, so a random site can't
+# inject Discord presence (a text/plain POST skips CORS preflight) or read
+# /status. No CORS headers are sent, so browsers also block page reads.
+_ALLOWED_ORIGIN_PREFIXES = ("moz-extension://", "chrome-extension://")
+
+# Payload fields the renderer uses, with their coercions. Everything else the
+# extension sends (url, focused, visible, ...) is dropped.
+_STR_FIELDS  = ("service", "mode", "title", "subtitle")
+_BOOL_FIELDS = ("active", "paused", "live", "backgroundHeartbeat")
+_NUM_FIELDS  = ("position", "duration")
+_STR_MAX     = 200
+
+
+def _sanitize_payload(raw):
+    """Whitelist + coerce an extension payload. Returns a dict or None if invalid."""
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for k in _STR_FIELDS:
+        v = raw.get(k)
+        if v is not None:
+            out[k] = str(v)[:_STR_MAX]
+    for k in _BOOL_FIELDS:
+        if k in raw:
+            out[k] = bool(raw.get(k))
+    for k in _NUM_FIELDS:
+        try:
+            v = float(raw.get(k) or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        # Reject NaN/inf/negative; cap at 7 days to keep timestamps sane.
+        out[k] = v if 0 <= v <= 7 * 86400 else 0.0
+    return out
+
+
 class NetflixRpcHandler(BaseHTTPRequestHandler):
-    def _send(self, status=204, body=b""):
+    def _send(self, status=204, body=b"", content_type=None):
         self.send_response(status)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        if content_type:
+            self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if body:
             self.wfile.write(body)
 
-    def do_OPTIONS(self):
-        self._send()
+    def _origin_ok(self):
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True  # non-browser client (curl, local tools)
+        if origin.startswith(_ALLOWED_ORIGIN_PREFIXES):
+            return True
+        rt.debug(f"Bridge: rejected request from origin {origin!r}")
+        self._send(403, b"forbidden")
+        return False
 
     def do_GET(self):
+        if not self._origin_ok():
+            return
         if self.path not in ("/", "/bridge", "/status"):
             self._send(404, b"not found")
             return
@@ -36,15 +84,11 @@ class NetflixRpcHandler(BaseHTTPRequestHandler):
             "hasActivity": activity is not None,
             "activity": activity
         }, indent=2).encode("utf-8")
-
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._send(200, body, "application/json")
 
     def do_POST(self):
+        if not self._origin_ok():
+            return
 
         if self.path != "/bridge":
             self._send(404, b"not found")
@@ -52,8 +96,17 @@ class NetflixRpcHandler(BaseHTTPRequestHandler):
 
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except ValueError:
+            length = -1
+        if length < 0 or length > BRIDGE_MAX_BODY:
+            self._send(413, b"too large")
+            return
+
+        try:
+            payload = _sanitize_payload(json.loads(self.rfile.read(length).decode("utf-8")))
         except Exception:
+            payload = None
+        if payload is None:
             self._send(400, b"bad json")
             return
 
@@ -122,10 +175,15 @@ def update_netflix_rpc(activity):
         subtitle = activity.get("subtitle") or ""
         mode = activity.get("mode") or "playing"
         paused = bool(activity.get("paused"))
+        live = bool(activity.get("live"))
         position = float(activity.get("position") or 0)
         duration = float(activity.get("duration") or 0)
         update_age = max(0, time.time() - float(activity.get("_received_at") or time.time()))
-        if not activity.get("backgroundHeartbeat") and not paused and duration > 0:
+        # Every payload's position is accurate as of when it was sent (heartbeats
+        # are pre-adjusted by the extension), so advance it by time since receipt.
+        # The extension only posts on changes + a 5 s heartbeat, so this can be
+        # several seconds; skipping it would trip the seek check below.
+        if not paused and duration > 0:
             position = min(duration, position + update_age)
 
         rt.debug(f"[{svc_label}] mode={mode} title={title!r} subtitle={subtitle!r} paused={paused} pos={position:.0f} dur={duration:.0f}")
@@ -133,14 +191,15 @@ def update_netflix_rpc(activity):
         if mode == "browsing":
             # Browsing presence is gated globally; when off, treat as idle.
             if not rt.BROWSING_ENABLED:
-                try:
-                    rt.RPC.clear()
-                except Exception:
-                    pass
+                # Clear once, not every tick; a non-None sig marks it done.
+                if rt.last_pushed_payload != "browsing-hidden":
+                    discord_rpc.safe_clear()
+                    rt.last_pushed_payload = "browsing-hidden"
                 tray.set_icon(True)
                 tray.set_tooltip("MediaRPC")
                 return
-            rt.RPC.update(
+            discord_rpc.push_presence(
+                ("browsing", service, svc_label, svc_logo),
                 name=svc_label,
                 activity_type=3,  # "Watching <service>"
                 details=f"Browsing {svc_label}",
@@ -187,7 +246,7 @@ def update_netflix_rpc(activity):
         elif meta.get("genres"):
             state = ", ".join(meta["genres"][:3])
         else:
-            state = "Paused" if paused else "Watching Netflix"
+            state = "Paused" if paused else ("🔴 LIVE" if live else f"Watching {svc_label}")
 
         title_changed    = title != rt.last_netflix_title
         subtitle_changed = subtitle != rt.last_netflix_subtitle
@@ -197,7 +256,15 @@ def update_netflix_rpc(activity):
         # so subtitle_changed is what catches E21 -> E22 (new position/duration,
         # needs a fresh timer, and forces Discord to re-render the activity).
         # When already paused, start is always None - no point recalculating.
-        needs_timer      = title_changed or subtitle_changed or paused_changed or (not paused and rt.last_netflix_start is None)
+        # Seek detection: while playing, the cached start implies an expected
+        # position; if the reported one is >5 s off, the user seeked (or the
+        # player buffered) and the bar needs re-anchoring.
+        seeked = (not paused and rt.last_netflix_start is not None and
+                  abs((time.time() - rt.last_netflix_start) - position) > 5)
+        if seeked:
+            rt.debug(f"[{svc_label}] seek detected - re-anchoring timer")
+        needs_timer      = (title_changed or subtitle_changed or paused_changed or seeked or
+                            (not paused and rt.last_netflix_start is None))
 
         # Mirror Emby's behaviour: clear Discord on a pause toggle (activity type
         # changes) and on an episode/title change. Without the clear, Discord keeps
@@ -245,7 +312,7 @@ def update_netflix_rpc(activity):
 
         poster_img = meta.get("poster") or svc_logo or None
         small_img  = (rt.STATUS_ICON_PAUSE if paused else rt.STATUS_ICON_PLAY) or None
-        small_txt  = "Paused" if paused else "Playing"
+        small_txt  = "Paused" if paused else ("🔴 LIVE" if live else "Playing")
 
         # Rate-limit guard: Discord silently drops updates over its ~5/20s cap.
         # This loop ticks every ~2s, so pushing unconditionally floods the cap and

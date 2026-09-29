@@ -15,6 +15,26 @@ def _provider_id(providers, *keys):
     return None
 
 
+# TMDB/OMDB calls run on the presence loop thread; keep them short so a slow API
+# can't freeze Discord updates for long.
+EXT_API_TIMEOUT = 5
+
+
+def _cache_store(cache, key, entry, ttl, failed):
+    """Store (*entry, ts) in an LRU cache. A failed lookup (network error or non-200)
+    is back-dated so it expires after POSTER_NULL_TTL instead of the full ttl -
+    a transient outage shouldn't pin "no rating/poster" for hours, but we also
+    don't want to re-hit a down API every 2 s tick."""
+    ts = time.time()
+    if failed:
+        ts -= max(0, ttl - rt.POSTER_NULL_TTL)
+    if key in cache:
+        cache.move_to_end(key)  # refreshed entry is now most-recently-used
+    elif len(cache) >= rt.CACHE_MAX_SIZE:
+        rt._evict_oldest(cache)
+    cache[key] = (*entry, ts)
+
+
 def get_omdb_rating(imdb_id=None, title=None, year=None, media_type="series"):
     if not rt.OMDB_KEY:
         return None
@@ -30,10 +50,12 @@ def get_omdb_rating(imdb_id=None, title=None, year=None, media_type="series"):
             return cached_rating
 
     rating = None
+    failed = False
     try:
         if imdb_id:
             params = {"apikey": rt.OMDB_KEY, "i": imdb_id}
-            r = rt.http.get("https://www.omdbapi.com/", params=params, timeout=10)
+            r = rt.http.get("https://www.omdbapi.com/", params=params, timeout=EXT_API_TIMEOUT)
+            failed = r.status_code != 200
             if r.status_code == 200:
                 data = r.json()
                 if data.get("Response") == "True":
@@ -45,7 +67,8 @@ def get_omdb_rating(imdb_id=None, title=None, year=None, media_type="series"):
             params = {"apikey": rt.OMDB_KEY, "t": title, "type": media_type}
             if year:
                 params["y"] = year
-            r = rt.http.get("https://www.omdbapi.com/", params=params, timeout=10)
+            r = rt.http.get("https://www.omdbapi.com/", params=params, timeout=EXT_API_TIMEOUT)
+            failed = r.status_code != 200
             if r.status_code == 200:
                 data = r.json()
                 if data.get("Response") == "True":
@@ -57,10 +80,9 @@ def get_omdb_rating(imdb_id=None, title=None, year=None, media_type="series"):
 
     except Exception as e:
         rt.log(f"OMDB fetch error: {e}")
+        failed = True
 
-    if len(rt.omdb_cache) >= rt.CACHE_MAX_SIZE:
-        rt._evict_oldest(rt.omdb_cache)
-    rt.omdb_cache[cache_key] = (rating, time.time())
+    _cache_store(rt.omdb_cache, cache_key, (rating,), rt.OMDB_CACHE_TTL, failed and rating is None)
     return rating
 
 
@@ -76,11 +98,13 @@ def get_tmdb_rating(tmdb_id=None, title=None, year=None, media_type="tv"):
             return cached_rating
 
     rating = None
+    failed = False
     params = {"api_key": rt.TMDB_KEY, "language": "en-US"}
     try:
         if tmdb_id:
             url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}"
-            r = rt.http.get(url, params=params, timeout=10)
+            r = rt.http.get(url, params=params, timeout=EXT_API_TIMEOUT)
+            failed = r.status_code != 200
             if r.status_code == 200:
                 avg = r.json().get("vote_average")
                 rating = float(avg) if avg else None
@@ -92,7 +116,8 @@ def get_tmdb_rating(tmdb_id=None, title=None, year=None, media_type="tv"):
             search_params = {**params, "query": title}
             if year:
                 search_params[year_param] = year
-            r = rt.http.get(search_url, params=search_params, timeout=10)
+            r = rt.http.get(search_url, params=search_params, timeout=EXT_API_TIMEOUT)
+            failed = r.status_code != 200
             if r.status_code == 200:
                 results = r.json().get("results", [])
                 if results:
@@ -103,10 +128,9 @@ def get_tmdb_rating(tmdb_id=None, title=None, year=None, media_type="tv"):
                     rt.log(f"TMDB search: no results for '{title}'")
     except Exception as e:
         rt.log(f"TMDB fetch error: {e}")
+        failed = True
 
-    if len(rt.tmdb_cache) >= rt.CACHE_MAX_SIZE:
-        rt._evict_oldest(rt.tmdb_cache)
-    rt.tmdb_cache[cache_key] = (rating, time.time())
+    _cache_store(rt.tmdb_cache, cache_key, (rating,), rt.OMDB_CACHE_TTL, failed and rating is None)
     return rating
 
 
@@ -122,25 +146,25 @@ def get_tmdb_media_info(title, media_type="tv", season=None):
             return cached_data
 
     info = {}
+    failed = False
     params = {"api_key": rt.TMDB_KEY, "language": "en-US"}
     try:
         search_url = f"https://api.themoviedb.org/3/search/{media_type}"
-        r = rt.http.get(search_url, params={**params, "query": title}, timeout=10)
+        r = rt.http.get(search_url, params={**params, "query": title}, timeout=EXT_API_TIMEOUT)
+        failed = r.status_code != 200
         if r.status_code == 200:
             results = r.json().get("results", [])
             if results:
                 result = next((candidate for candidate in results if tmdb_title_matches(title, candidate, media_type)), None)
                 if not result:
                     rt.log(f"Netflix TMDB {media_type} search rejected loose matches for '{title}'")
-                    if len(rt.netflix_meta_cache) >= rt.CACHE_MAX_SIZE:
-                        rt._evict_oldest(rt.netflix_meta_cache)
-                    rt.netflix_meta_cache[cache_key] = ({}, time.time())
+                    _cache_store(rt.netflix_meta_cache, cache_key, ({},), rt.POSTER_CACHE_TTL, False)
                     return {}
                 tmdb_id = result.get("id")
                 details_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}"
                 details = {}
                 if tmdb_id:
-                    d = rt.http.get(details_url, params=params, timeout=10)
+                    d = rt.http.get(details_url, params=params, timeout=EXT_API_TIMEOUT)
                     if d.status_code == 200:
                         details = d.json()
 
@@ -151,7 +175,7 @@ def get_tmdb_media_info(title, media_type="tv", season=None):
                     try:
                         s = rt.http.get(
                             f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{int(season)}",
-                            params=params, timeout=10
+                            params=params, timeout=EXT_API_TIMEOUT
                         )
                         if s.status_code == 200:
                             season_poster = s.json().get("poster_path")
@@ -191,10 +215,9 @@ def get_tmdb_media_info(title, media_type="tv", season=None):
                 rt.log(f"Netflix TMDB {media_type} search '{title}'{f' S{season}' if season else ''} → poster={'yes' if info.get('poster') else 'no'} rating={info.get('rating')}")
     except Exception as e:
         rt.log(f"Netflix TMDB lookup error: {e}")
+        failed = True
 
-    if len(rt.netflix_meta_cache) >= rt.CACHE_MAX_SIZE:
-        rt._evict_oldest(rt.netflix_meta_cache)
-    rt.netflix_meta_cache[cache_key] = (info, time.time())
+    _cache_store(rt.netflix_meta_cache, cache_key, (info,), rt.POSTER_CACHE_TTL, failed and not info)
     return info
 
 

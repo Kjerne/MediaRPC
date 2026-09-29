@@ -6,6 +6,21 @@
   let cachedTitle = "";
   let cachedSubtitle = "";
 
+  // Live progress (ESPN on Disney+). The <video> element has no usable duration
+  // for live, but the player's timeline slider exposes the real program position
+  // and length via aria-value* (pos = valuenow-valuemin, total = valuemax-valuemin).
+  // The slider only exists while the controls overlay is visible, so cache the
+  // last reading and extrapolate position from wall-clock time between reads.
+  let cachedLiveDur = 0;
+  let cachedLivePos = 0;
+  let cachedLiveAt = 0;
+
+  // The deep DOM walk (every element + open shadow roots) is the expensive part
+  // of a tick. Once an episode line is cached, rescan only every SCAN_EVERY_MS;
+  // a new title resets the cache and forces an immediate scan.
+  const SCAN_EVERY_MS = 5000;
+  let lastScanAt = 0;
+
   function cleanTitle(value) {
     if (!value) {
       return "";
@@ -110,9 +125,7 @@
     return name ? `${marker} - ${name}` : marker;
   }
 
-  function getSubtitle() {
-    const all = [];
-    collectDeep(document, all);
+  function getSubtitle(all) {
     let best = null;
     let bestTop = Infinity;
     for (const el of all) {
@@ -137,6 +150,64 @@
       }
     }
     return best ? normalizeEpisode(cleanTitle(best)) : "";
+  }
+
+  // Read the live timeline slider (deep, through shadow roots). Returns program
+  // position/length in seconds, or null when the slider isn't currently rendered.
+  // The volume control is also role=slider, so require a progress-bar class and a
+  // total larger than a volume range (0-100).
+  function getLiveProgress(all) {
+    for (const el of all) {
+      if (!el.getAttribute || el.getAttribute("role") !== "slider") {
+        continue;
+      }
+      const vmin = parseFloat(el.getAttribute("aria-valuemin"));
+      const vnow = parseFloat(el.getAttribute("aria-valuenow"));
+      const vmax = parseFloat(el.getAttribute("aria-valuemax"));
+      if (![vmin, vnow, vmax].every(Number.isFinite)) {
+        continue;
+      }
+      // Exclude the volume slider (0-100, valuetext "52 of 100"). The timeline
+      // range is in seconds and reads like "1:05:44 of 2:29:51".
+      const vtext = el.getAttribute("aria-valuetext") || "";
+      const cls = (el.className || "").toString();
+      if (!/\d+:\d\d/.test(vtext) && !cls.includes("progress-bar")) {
+        continue;
+      }
+      const dur = vmax - vmin;
+      const pos = vnow - vmin;
+      if (dur > 60 && pos >= 0) {
+        return { pos, dur };
+      }
+    }
+    return null;
+  }
+
+  // The timeline slider is only mounted while the controls overlay is visible.
+  // Nudge the player to reveal controls so getLiveProgress can read the program
+  // total at least once; once cached we stop nudging and let them hide normally.
+  function coaxControls(video) {
+    try {
+      const targets = [
+        document,
+        document.body,
+        video,
+        video.parentElement,
+        video.parentElement && video.parentElement.parentElement
+      ].filter(Boolean);
+      const opts = {
+        bubbles: true, cancelable: true, view: window,
+        clientX: Math.round(window.innerWidth / 2),
+        clientY: Math.round(window.innerHeight / 2)
+      };
+      for (const t of targets) {
+        for (const type of ["mousemove", "mouseover", "pointermove"]) {
+          t.dispatchEvent(new MouseEvent(type, opts));
+        }
+      }
+    } catch (_) {
+      // Best-effort only.
+    }
   }
 
   function send(payload) {
@@ -170,25 +241,66 @@
     }
 
     if (title && title !== cachedTitle) {
-      // New title - drop any cached episode line from the previous show.
+      // New title - drop any cached episode line and live progress from the
+      // previous show.
       cachedTitle = title;
       cachedSubtitle = "";
+      cachedLiveDur = 0;
+      cachedLivePos = 0;
+      cachedLiveAt = 0;
+      lastScanAt = 0;
     }
-    const found = getSubtitle();
-    if (found) {
-      cachedSubtitle = found;
-    }
-    const subtitle = found || cachedSubtitle;
 
-    const dur = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    const live = !Number.isFinite(video.duration) && video.currentTime > 0;
+    const now = Date.now();
+    const needScan = !cachedSubtitle || (live && cachedLiveDur === 0) ||
+      now - lastScanAt >= SCAN_EVERY_MS;
+    // One walk per scan, shared by the subtitle and live-slider lookups.
+    let all = null;
+    if (needScan) {
+      all = [];
+      collectDeep(document, all);
+      lastScanAt = now;
+      const found = getSubtitle(all);
+      if (found) {
+        cachedSubtitle = found;
+      }
+    }
+    const subtitle = cachedSubtitle;
+
+    let dur = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    let position = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+
+    // Live streams (ESPN on Disney+) report duration null/Infinity/NaN. The real
+    // program position/length live on the timeline slider instead - read it so
+    // Discord can draw a proper predicting bar. When the slider is hidden, reuse
+    // the last reading and advance position by elapsed wall-clock (unless paused).
+    if (live) {
+      const lp = all ? getLiveProgress(all) : null;
+      if (lp) {
+        cachedLiveDur = lp.dur;
+        cachedLivePos = lp.pos;
+        cachedLiveAt = Date.now();
+      } else if (cachedLiveDur === 0) {
+        coaxControls(video); // reveal controls to read the total on a later tick
+      }
+      if (cachedLiveDur > 0) {
+        const age = video.paused ? 0 : (Date.now() - cachedLiveAt) / 1000;
+        dur = cachedLiveDur;
+        position = Math.min(cachedLiveDur, cachedLivePos + age);
+      } else {
+        dur = 0; // no reading yet - fall back to elapsed count-up
+      }
+    }
 
     send({
       active: true,
       service: "disney",
+      live,
       title: title || cachedTitle,
       subtitle,
       paused: video.paused,
-      position: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+      position,
       duration: dur,
       focused: document.hasFocus(),
       visible: !document.hidden,

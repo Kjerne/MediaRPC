@@ -4,6 +4,31 @@
   let cachedTitle = "";
   let cachedSubtitle = "";
 
+  // The S/E overlay needs a deep DOM walk (all elements + shadow roots) and only
+  // renders while the controls are visible. Cache the last hit per document.title
+  // (a new episode changes the title) and rescan on a timer instead of every
+  // tick: every 5 s once found, every 2 s while still looking (or for movies).
+  let cachedSe = null;
+  let seDocTitle = null;
+  let lastScanAt = 0;
+
+  function seasonEpisode() {
+    const now = Date.now();
+    if (document.title !== seDocTitle) {
+      seDocTitle = document.title;
+      cachedSe = null;
+      lastScanAt = 0;
+    }
+    if (now - lastScanAt >= (cachedSe ? 5000 : 2000)) {
+      lastScanAt = now;
+      const found = getSeasonEpisode();
+      if (found) {
+        cachedSe = found;
+      }
+    }
+    return cachedSe;
+  }
+
   function cleanTitle(value) {
     if (!value) {
       return "";
@@ -123,7 +148,12 @@
       video && (src.startsWith("blob:") || (Number.isFinite(video.duration) && video.duration > 0) || video.currentTime > 0)
     );
 
-    const se = getSeasonEpisode();
+    if (!isRealPlayer) {
+      send({ active: false });
+      return;
+    }
+
+    const se = seasonEpisode();
     const parts = splitDocTitle(document.title);
 
     // With a season/episode marker this is a series episode: series is the title,

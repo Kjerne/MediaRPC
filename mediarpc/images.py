@@ -176,7 +176,12 @@ def upload_image(url, request_headers=None, square=True):
         return cached
 
     try:
-        raw = rt.http.get(url, headers=request_headers or {}, timeout=10).content
+        r = rt.http.get(url, headers=request_headers or {}, timeout=8)
+        if r.status_code != 200:
+            # Don't feed an error page to PIL (cryptic "cannot identify image").
+            rt.log(f"Poster download HTTP {r.status_code}")
+            return None
+        raw = r.content
         if square:
             raw = square_poster_bytes(raw)
         hosted = upload_image_bytes(raw)

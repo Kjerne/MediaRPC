@@ -11,6 +11,7 @@ from PIL import Image
 
 from . import rt
 from . import discord_rpc
+from . import images
 
 
 class LeftClickIcon(pystray.Icon):
@@ -74,25 +75,48 @@ def toggle_console(icon, item):
             ctypes.windll.user32.ShowWindow(hwnd, 5)  # SW_SHOW
 
 
+# Renderers call set_icon/set_tooltip every loop tick. Load each .ico once and
+# skip no-op updates, so we don't hit the disk and re-register the tray icon
+# with the shell every 2 s.
+_icon_images = {}
+_current_icon = None
+_current_tooltip = None
+
+
+def _load_icon(paused):
+    img = _icon_images.get(paused)
+    if img is None:
+        icon_file = "MediaRPC_Inactive.ico" if paused else "MediaRPC_Active.ico"
+        path = rt.resource_path(os.path.join("Images", icon_file))
+        if not os.path.exists(path):
+            rt.log(f"ERROR: Icon file not found: {path}")
+            return None
+        with Image.open(path) as f:
+            img = f.copy()
+        _icon_images[paused] = img
+    return img
+
+
 def set_icon(paused):
-    if rt.icon_ref is None:
+    global _current_icon
+    paused = bool(paused)
+    if rt.icon_ref is None or _current_icon == paused:
         return
-
-    icon_file = "MediaRPC_Inactive.ico" if paused else "MediaRPC_Active.ico"
-    path = rt.resource_path(os.path.join("Images", icon_file))
-
-    if os.path.exists(path):
-        rt.icon_ref.icon = Image.open(path)
-    else:
-        rt.log(f"ERROR: Icon file not found: {path}")
+    img = _load_icon(paused)
+    if img is not None:
+        rt.icon_ref.icon = img
+        _current_icon = paused
 
 
 def set_tooltip(text):
-    if rt.icon_ref is not None:
-        try:
-            rt.icon_ref.title = text
-        except Exception:
-            pass
+    global _current_tooltip
+    if rt.icon_ref is None or text == _current_tooltip:
+        return
+    try:
+        rt.icon_ref.title = text
+        _current_tooltip = text
+    except Exception:
+        pass
 
 
 def toggle_rpc(icon, item):
@@ -100,11 +124,9 @@ def toggle_rpc(icon, item):
 
     if rt.paused_rpc:
         rt.log("RPC manually PAUSED by user")
-        if rt.RPC:
-            try:
-                rt.RPC.clear()
-            except Exception:
-                pass
+        discord_rpc.safe_clear()
+        # Resume must re-push even if the content is unchanged.
+        rt.last_pushed_payload = None
         set_icon(True)
         set_tooltip("MediaRPC - Paused")
     else:
@@ -124,11 +146,10 @@ def open_serializd(icon, item):
 def quit_app(icon, item):
     rt.running = False
 
-    if rt.RPC:
-        try:
-            rt.RPC.clear()
-        except Exception:
-            pass
+    discord_rpc.safe_clear()
+    # Throttled saves may be holding the newest uploads in memory only.
+    if rt._img_cache_loaded:
+        images._img_cache_save(force=True)
 
     icon.stop()
 
@@ -178,8 +199,11 @@ def create_menu():
 
 def tray():
 
-    image = Image.open(rt.resource_path(os.path.join("Images", "MediaRPC_Inactive.ico")))
+    global _current_icon, _current_tooltip
+    image = _load_icon(True)
     menu  = create_menu()
+    _current_icon    = True
+    _current_tooltip = "MediaRPC"
 
     rt.icon_ref = LeftClickIcon(
         "MediaRPC",

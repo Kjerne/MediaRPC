@@ -226,6 +226,10 @@ RECONCILE_TIMEOUT   = int(os.getenv("RECONCILE_TIMEOUT", 4))
 running    = True
 paused_rpc = False
 RPC        = None
+# Serialises every touch of the Discord IPC socket. The rpc loop, the tray menu
+# (pause/refresh/quit) and reconnects all run on different threads; pypresence
+# is not thread-safe and connect_rpc closes the old socket mid-use otherwise.
+rpc_lock   = threading.RLock()
 
 # OrderedDict so eviction is O(1) LRU: getters move_to_end() on a hit, and
 # _evict_oldest() pops the least-recently-used item off the front.
@@ -244,6 +248,7 @@ next_reconnect_time = 0.0   # gate: don't attempt reconnect before this (non-blo
 # Thread safety: protects current_sessions (written by WS thread, read by RPC loop)
 state_lock       = threading.Lock()
 current_sessions = []   # kept up to date by WebSocket; HTTP fallback when WS is down
+http_sessions    = None # last /Sessions result on the HTTP-only path (None = fetch failed)
 ws_connected     = False
 ws_app           = None   # live WebSocketApp, so the Netflix guard can close it
 ws_last_message_time = 0.0
@@ -267,7 +272,7 @@ last_netflix_subtitle = None
 last_netflix_paused = False
 last_netflix_start  = None
 last_netflix_end    = None
-last_mode      = None   # "playing" | "browsing" | None
+last_mode      = None   # "playing" | "browsing" | "plezy" | "netflix" | "idle" | None
 
 # Discord SET_ACTIVITY rate-limit guard (Discord drops >5 updates / 20s).
 # Only push when the payload changes; otherwise heartbeat every 15s.
@@ -309,6 +314,10 @@ plezy_poster_cache   = OrderedDict()  # {rating_key: (square_url, ts)}
 plezy_emby_cache    = OrderedDict()  # {item_id: (emby_item_dict, ts)} - Plezy playing Emby content
 last_plezy_ratingkey = None     # for episode/movie-change clear
 last_plezy_paused    = None     # for pause-change clear
+last_plezy_start     = None     # cached timer so the payload doesn't drift every tick
+last_plezy_end       = None
+plezy_part_miss      = OrderedDict()  # {part_id: ts} - negative cache for api_cache lookups
+PLEZY_PART_MISS_TTL  = 15       # seconds before re-copying Plezy's DB for an unresolved part
 _plezy_ready         = True     # no network setup; get_plezy_activity self-gates on the pipe
 _plezy_last_poll     = 0.0
 _plezy_cached_activity = None

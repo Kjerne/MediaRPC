@@ -14,6 +14,27 @@
   let cachedSeries = "";
   let cachedSubtitle = "";
 
+  // getEpisodeInfo walks the whole DOM + shadow roots. The .sr-only label it
+  // reads is always mounted, so cache the result per document.title and rescan
+  // every 5 s (2 s while nothing found) instead of every tick.
+  let cachedEp = null;
+  let epDocTitle = null;
+  let lastScanAt = 0;
+
+  function episodeInfo() {
+    const now = Date.now();
+    if (document.title !== epDocTitle) {
+      epDocTitle = document.title;
+      cachedEp = null;
+      lastScanAt = 0;
+    }
+    if (now - lastScanAt >= (cachedEp ? 5000 : 2000)) {
+      lastScanAt = now;
+      cachedEp = getEpisodeInfo();
+    }
+    return cachedEp;
+  }
+
   // Silo's player renders one real MSE <video> (blob: src, real duration). Score
   // and pick it in case poster-preview/dummy videos are also on the page.
   function pickVideo() {
@@ -130,7 +151,12 @@
       video && (src.startsWith("blob:") || (Number.isFinite(video.duration) && video.duration > 0) || video.currentTime > 0)
     );
 
-    const ep = getEpisodeInfo();
+    if (!isRealPlayer) {
+      send({ active: false });
+      return;
+    }
+
+    const ep = episodeInfo();
 
     let title = "";
     let subtitle = "";
