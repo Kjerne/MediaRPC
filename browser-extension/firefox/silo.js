@@ -1,12 +1,23 @@
-(function () {
+(async function () {
   // Silo is a *self-hosted* media server web UI. Its hostname is server-dependent
-  // but always starts with "silo." (silo.batsy.eu, silo.<whatever>, a LAN host).
+  // and usually starts with "silo." (silo.batsy.eu, silo.<whatever>). Hosts that
+  // don't can be added in the extension popup (Advanced > Silo hosts).
   // Firefox match patterns can't wildcard a TLD, so this script is declared against
   // a broad match in the manifest and hard-gates on the hostname here. On any
   // non-silo host it installs nothing and never posts a message, so it can't race
   // the per-site scripts (netflix.js / disneyplus.js / tv2.js).
-  if (!location.hostname.startsWith("silo.")) {
-    return;
+  const host = location.hostname.toLowerCase();
+  if (!host.startsWith("silo.")) {
+    let extra = [];
+    try {
+      const got = await browser.storage.local.get("settings");
+      extra = ((got.settings || {}).siloHosts || []).map((h) => String(h).trim().toLowerCase());
+    } catch (_) {
+      // Storage unavailable - only the silo.* default applies.
+    }
+    if (!extra.includes(host)) {
+      return;
+    }
   }
 
   const UPDATE_MS = 1000;

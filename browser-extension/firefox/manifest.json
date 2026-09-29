@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "MediaRPC Browser Bridge",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Sends Netflix, Disney+, TV 2 Play, and Silo playback state to the local MediaRPC tray app.",
   "author": "Kjerne",
   "icons": {
@@ -11,15 +11,35 @@
   },
   "permissions": [
     "http://127.0.0.1:5678/*",
+    "http://127.0.0.1/*",
     "https://www.netflix.com/*",
     "https://www.disneyplus.com/*",
     "https://play.tv2.dk/*",
-    "tabs"
+    "tabs",
+    "storage"
   ],
   "background": {
     "scripts": [
+      "settings.js",
       "background.js"
     ]
+  },
+  "browser_action": {
+    "default_icon": {
+      "48": "icons/icon-48.png",
+      "96": "icons/icon-96.png"
+    },
+    "default_title": "MediaRPC",
+    "default_popup": "popup.html",
+    "browser_style": false
+  },
+  "commands": {
+    "toggle-pause": {
+      "suggested_key": {
+        "default": "Alt+Shift+P"
+      },
+      "description": "Pause / resume Discord presence"
+    }
   },
   "content_scripts": [
     {

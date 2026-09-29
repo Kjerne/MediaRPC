@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="icons/icon-48.png" alt="" width="20" height="20">
+    <h1>MediaRPC</h1>
+    <span id="app-status" class="pill"><span class="dot"></span><span id="app-status-text">Checking…</span></span>
+  </header>
+
+  <section id="now" class="card">
+    <div class="label">Now</div>
+    <div id="now-title" class="now-title">Nothing playing</div>
+    <div id="now-sub" class="now-sub"></div>
+  </section>
+
+  <label class="row main-toggle">
+    <span>
+      <span class="row-title">Presence</span>
+      <span class="hint">Pause/resume: <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd></span>
+    </span>
+    <input type="checkbox" id="enabled" class="switch">
+  </label>
+
+  <h2>Services</h2>
+  <div id="services" class="group"></div>
+
+  <h2>Options</h2>
+  <div class="group">
+    <label class="row">
+      <span class="row-title">Show browsing</span>
+      <input type="checkbox" id="showBrowsing" class="switch">
+    </label>
+    <label class="row">
+      <span class="row-title">Clear when paused for</span>
+      <select id="autoClear">
+        <option value="0">Never</option>
+        <option value="5">5 min</option>
+        <option value="10">10 min</option>
+        <option value="15">15 min</option>
+        <option value="30">30 min</option>
+        <option value="60">1 hour</option>
+      </select>
+    </label>
+  </div>
+
+  <details>
+    <summary>Advanced</summary>
+    <div class="group">
+      <label class="field">
+        <span class="row-title">Bridge port</span>
+        <input type="number" id="bridgePort" min="1" max="65535">
+        <span class="hint">Must match <code>BRIDGE_PORT</code> in MediaRPC's .env</span>
+      </label>
+      <label class="field">
+        <span class="row-title">Extra Silo hosts</span>
+        <input type="text" id="siloHosts" placeholder="media.example.com, 192.168.1.20" spellcheck="false">
+        <span class="hint">Comma-separated. <code>silo.*</code> hosts always work. Reload the Silo tab after changing.</span>
+      </label>
+    </div>
+  </details>
+
+  <footer id="version"></footer>
+
+  <script src="settings.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

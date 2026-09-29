@@ -21,6 +21,13 @@ class LeftClickIcon(pystray.Icon):
         from pystray._util import win32
         # Show the menu on either mouse button release
         if self._menu_handle and lparam in (win32.WM_LBUTTONUP, win32.WM_RBUTTONUP):
+            # pystray builds the native menu once and only rebuilds it after a
+            # menu item is clicked, so callable labels (the Status submenu) froze
+            # at their startup values ("Source: idle"). Rebuild right before
+            # showing so they reflect live state. Cheap: a handful of items.
+            self._update_menu()
+            if not self._menu_handle:
+                return
             # TrackPopupMenuEx does not behave unless our systray window is the
             # foreground window
             win32.SetForegroundWindow(self._hwnd)
@@ -165,6 +172,11 @@ _SOURCE_LABELS = {
 def _status_source(item):
     if rt.paused_rpc:
         return "Source: paused by user"
+    if rt.last_mode == "netflix":
+        # Name the actual streaming service instead of the generic bridge label.
+        with rt.netflix_lock:
+            svc = ((rt.netflix_activity or {}).get("service") or "netflix").lower()
+        return f"Source: {rt.SERVICE_LABELS.get(svc, 'Browser')} (browser)"
     return f"Source: {_SOURCE_LABELS.get(rt.last_mode, 'idle')}"
 
 

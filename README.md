@@ -58,11 +58,30 @@ Copy `token` into `TOKEN` and `userId` into `EMBY_USER_ID` in your `.env`.
 
 The extension scrapes Netflix / Disney+ / TV 2 Play / Silo playback and posts it
 to the app at `http://127.0.0.1:5678/bridge` (matches `BRIDGE_PORT`). If you change
-the port, update `background.js` and the manifest permission to match.
+`BRIDGE_PORT`, set the same port in the extension popup under **Advanced > Bridge port**.
 
 **Silo** is a self-hosted media server web UI - its hostname is server-dependent
-but always starts with `silo.` (e.g. `silo.example.com`). The `silo.js` content
-script activates on any such host and stays inert everywhere else.
+and usually starts with `silo.` (e.g. `silo.example.com`). The `silo.js` content
+script activates on any such host and stays inert everywhere else. If your Silo
+host doesn't start with `silo.`, add it under **Advanced > Extra Silo hosts**.
+
+### Popup & settings
+
+Click the MediaRPC icon in the Firefox toolbar:
+
+- **Presence** - pause/resume everything the extension sends (shortcut
+  **Alt+Shift+P**, rebindable in `about:addons` > gear > Manage Extension Shortcuts).
+  The icon shows `II` while paused and `!` when the app isn't reachable.
+- **Services** - turn Netflix, Disney+, TV 2 Play or Silo on/off individually.
+- **Show browsing** - show or hide "Browsing Netflix" presence.
+- **Clear when paused for** - drop the presence after a video has been paused
+  for 5 min to 1 hour; it comes back as soon as you resume.
+- **Now** / status - what the extension is currently sending and whether the
+  MediaRPC app is running.
+
+These settings live in the browser. The app's own `.env` switches
+(`NETFLIX_ENABLED`, `TV2_ENABLED`, `BROWSING_ENABLED`, ...) still apply; a service
+shows only if both sides allow it.
 
 ### Option A - Install from Mozilla Add-ons (recommended, easiest)
 
@@ -103,7 +122,7 @@ After editing files in `browser-extension/firefox/`, repack:
 
 ```bash
 cd browser-extension/firefox
-zip -r ../mediarpc-browser-bridge.xpi manifest.json background.js netflix.js disneyplus.js tv2.js silo.js icons
+zip -r ../mediarpc-browser-bridge.xpi manifest.json settings.js background.js popup.html popup.css popup.js netflix.js disneyplus.js tv2.js silo.js icons
 ```
 
 ## Plezy
