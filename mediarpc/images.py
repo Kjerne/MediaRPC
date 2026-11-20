@@ -111,8 +111,7 @@ def upload_image_bytes(raw):
 
 
 def _img_cache_path():
-    base = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
-    return os.path.join(base, "image_cache.json")
+    return os.path.join(rt.SETTINGS_DIR, "image_cache.json")
 
 
 def _img_cache_load():

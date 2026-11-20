@@ -8,6 +8,7 @@ image_cache.json
 dist/
 build/
 *.spec
+!mediarpc/MediaRPC.spec
 __pycache__/
 *.pyc
 # Packed browser extension - users build/load it from browser-extension/firefox/
@@ -18,3 +19,6 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+
+silage_auth.json
+mediarpc/build/

@@ -32,7 +32,34 @@ Priority when several are active: **Emby (playing) → Plezy → Browser → Emb
 - Emby server + API token (for the Emby source)
 - Optional: TMDB & OMDB API keys, a Zipline instance or ImgBB key
 
-## Setup
+## Download
+
+Grab `MediaRPC-x.y.z.exe` from the [latest release](https://github.com/Kjerne/MediaRPC/releases/latest)
+and run it. On first start a setup window offers to **import settings from an earlier
+MediaRPC** (it looks next to the exe, where an existing Start-with-Windows entry points,
+and the usual `dist` folders) and to **start with Windows**.
+
+- **Settings**: tray menu > **Settings...** (dark-themed window with General, Emby,
+  Sources, Images & ratings and Buttons tabs; **Save & restart** applies them).
+  They're stored as `.env` in `%APPDATA%\MediaRPC`, together with the Silage sign-in,
+  image cache and log (**Open settings folder** in the tray). A `.env` next to the exe
+  still takes priority (portable mode). Missing required keys open the window instead
+  of quitting.
+- **Tray menu** also has **Get browser extension**, **Check for updates**, **Restart**.
+- **Updates**: MediaRPC checks GitHub once a day. When a new version is out you get a
+  notification and an **Install update** item in the tray menu; it downloads the new
+  exe, verifies GitHub's SHA-256 checksum, replaces itself in place and restarts.
+  Your `.env` and sign-in files are kept. Turn the check off with `UPDATE_CHECK=false`.
+- **Start with Windows**: toggle it in the tray menu (per-user, no admin rights).
+- The version is shown under **Status** in the tray menu.
+
+### Releasing (maintainers)
+
+Bump `VERSION` in `mediarpc/version.py`, commit, then push a matching tag:
+`git tag v1.0.1 && git push origin v1.0.1`. GitHub Actions builds
+`MediaRPC-1.0.1.exe` and attaches it to the release.
+
+## Build from source
 
 1. **Clone** and enter the folder.
 2. **Configure**: copy `.env.example` → `.env` and fill it in.

@@ -32,7 +32,7 @@ echo [2/3] Building MediaRPC executable...
 echo ================================================
 echo.
 
-py -m PyInstaller --onefile --noconsole --name MediaRPC --icon=mediarpc/Images/MediaRPC_Active.ico --add-data "mediarpc/Images/MediaRPC_Active.ico;Images" --add-data "mediarpc/Images/MediaRPC_Inactive.ico;Images" mediarpc/run_mediarpc.py
+py -m PyInstaller --noconfirm --workpath build\work mediarpc/MediaRPC.spec
 
 if errorlevel 1 (
     echo.

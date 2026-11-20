@@ -58,12 +58,11 @@ def resource_path(relative):
 # Load .env
 # -----------------------------
 
-if getattr(sys, 'frozen', False):
-    # Frozen: .env sits next to the exe (build.bat copies it into dist\).
-    dotenv_path = os.path.join(os.path.dirname(sys.executable), '.env')
-else:
-    # Source: .env lives inside the package dir alongside the code.
-    dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+# Settings folder: .env next to the exe (portable), else %APPDATA%\MediaRPC; the
+# package folder when running from source. See config.py.
+from . import config
+SETTINGS_DIR = config.settings_dir()
+dotenv_path = config.env_path()
 if os.path.exists(dotenv_path):
     load_dotenv(dotenv_path)
 else:
@@ -131,6 +130,21 @@ PLEZY_PLEX_ENABLED   = os.getenv("PLEZY_PLEX_ENABLED", "true").lower() == "true"
 PLEZY_EMBY_ENABLED   = os.getenv("PLEZY_EMBY_ENABLED", "true").lower() == "true"
 PLEZY_POLL_INTERVAL   = int(os.getenv("PLEZY_POLL_INTERVAL") or os.getenv("PLEX_POLL_INTERVAL") or 3)   # secs between mpv IPC polls
 PLEZY_MPV_PIPE        = os.getenv("PLEZY_MPV_PIPE") or os.getenv("PLEX_MPV_PIPE") or r"\\.\pipe\plezympv"
+
+# Silage source (native Silo desktop app). Playback is read from the Silo server's
+# sessions API; the server is taken from Silage's own state unless overridden.
+SILAGE_ENABLED       = os.getenv("SILAGE_ENABLED", "true").lower() == "true"
+SILAGE_SERVER        = (os.getenv("SILAGE_SERVER") or "").rstrip("/")
+SILAGE_API_KEY       = os.getenv("SILAGE_API_KEY")
+SILAGE_POLL_INTERVAL = int(os.getenv("SILAGE_POLL_INTERVAL", 5))
+SILAGE_HOMES = [p for p in (
+    os.getenv("SILAGE_HOME"),
+    os.path.join(os.path.expanduser("~"), "Documents", "Silage"),       # portable build
+    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Silage"),         # installed build
+) if p]
+
+# Check GitHub Releases for a newer MediaRPC (daily, plus tray "Check for updates").
+UPDATE_CHECK_ENABLED = os.getenv("UPDATE_CHECK", "true").lower() == "true"
 
 LETTERBOXD_URL = os.getenv("LETTERBOXD_URL", "https://letterboxd.com/Kjerne/")
 SERIALIZD_URL  = os.getenv("SERIALIZD_URL", "https://www.serializd.com/user/Kjerne/profile")
@@ -272,7 +286,7 @@ last_netflix_subtitle = None
 last_netflix_paused = False
 last_netflix_start  = None
 last_netflix_end    = None
-last_mode      = None   # "playing" | "browsing" | "plezy" | "netflix" | "idle" | None
+last_mode      = None   # "playing" | "browsing" | "plezy" | "silage" | "netflix" | "idle" | None
 
 # Discord SET_ACTIVITY rate-limit guard (Discord drops >5 updates / 20s).
 # Only push when the payload changes; otherwise heartbeat every 15s.
@@ -309,15 +323,18 @@ _PLEZY_DATA_GLOB = os.path.join(
 )
 plezy_state          = {}       # runtime: server_uri, server_token (parsed from the mpv path)
 plezy_meta_cache     = OrderedDict()  # {thumb_path: (public_url, ts)}
-plezy_part_cache     = OrderedDict()  # {part_id: metadata_dict}
+plezy_part_cache     = OrderedDict()  # {(base, part_id): metadata_dict} - part ids are per-server
 plezy_poster_cache   = OrderedDict()  # {rating_key: (square_url, ts)}
 plezy_emby_cache    = OrderedDict()  # {item_id: (emby_item_dict, ts)} - Plezy playing Emby content
 last_plezy_ratingkey = None     # for episode/movie-change clear
 last_plezy_paused    = None     # for pause-change clear
 last_plezy_start     = None     # cached timer so the payload doesn't drift every tick
 last_plezy_end       = None
-plezy_part_miss      = OrderedDict()  # {part_id: ts} - negative cache for api_cache lookups
-PLEZY_PART_MISS_TTL  = 15       # seconds before re-copying Plezy's DB for an unresolved part
+plezy_part_miss      = OrderedDict()  # {(base, part_id): (ts, attempts)} - negative cache for metadata lookups
+PLEZY_PART_MISS_TTL  = 15       # seconds between lookups for an unresolved part, after the fast retries
+PLEZY_PART_FAST_RETRIES = 3     # misses retried on every mpv poll before backing off to the TTL
+plezy_sections_cache = {}       # {base: ([(section_key, plex_type)], ts)} - Plex library sections per server
+PLEZY_SECTIONS_TTL   = 600
 _plezy_ready         = True     # no network setup; get_plezy_activity self-gates on the pipe
 _plezy_last_poll     = 0.0
 _plezy_cached_activity = None
@@ -346,9 +363,10 @@ _IMG_CACHE_TTL = max(3600, _UPLOAD_EXPIRY - 6 * 3600)        # re-upload ~6h bef
 # -----------------------------
 
 _log_path = os.path.join(
-    os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(os.path.join(__file__, ".."))),
+    SETTINGS_DIR if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(os.path.join(__file__, ".."))),
     "MediaRPC.log"
 )
+os.makedirs(os.path.dirname(_log_path), exist_ok=True)
 _logger = logging.getLogger("MediaRPC")
 # INFO by default; DEBUG env promotes the per-tick verbose logs (rt.debug) to disk.
 _logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)

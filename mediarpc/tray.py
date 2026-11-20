@@ -12,6 +12,9 @@ from PIL import Image
 from . import rt
 from . import discord_rpc
 from . import images
+from . import autostart
+from . import updater
+from .version import VERSION
 
 
 class LeftClickIcon(pystray.Icon):
@@ -165,6 +168,7 @@ _SOURCE_LABELS = {
     "playing":  "Emby (playing)",
     "browsing": "Emby (browsing)",
     "plezy":    "Plezy",
+    "silage":   "Silage (Silo)",
     "netflix":  "Browser (Netflix/Disney+/TV 2)",
 }
 
@@ -186,12 +190,77 @@ def _status_conn(item):
     return f"Discord: {discord}   ·   WebSocket: {ws}"
 
 
+def notify(message, title="MediaRPC"):
+    """Windows toast from the tray icon (no-op before the icon exists)."""
+    try:
+        if rt.icon_ref is not None:
+            rt.icon_ref.notify(message, title)
+    except Exception as e:
+        rt.debug(f"notify failed: {e}")
+
+
+def refresh_menu():
+    try:
+        if rt.icon_ref is not None:
+            rt.icon_ref.update_menu()
+    except Exception:
+        pass
+
+
+def toggle_autostart(icon, item):
+    on = not autostart.is_enabled()
+    if autostart.set_enabled(on):
+        rt.log(f"Start with Windows: {'ON' if on else 'OFF'}")
+    else:
+        notify("Couldn't change the Start with Windows setting.")
+
+
+def _install_update(icon, item):
+    import threading
+    threading.Thread(target=updater.install, daemon=True, name="update-install").start()
+
+
+def _check_updates(icon, item):
+    import threading
+    threading.Thread(target=updater.check, args=(True,), daemon=True, name="update-check").start()
+
+
+def restart_app(icon=None, item=None):
+    """Start a fresh instance (it waits for this one to exit) and quit."""
+    from . import ui_settings
+    ui_settings.launch("--wait-pid", str(os.getpid()))
+    quit_app(rt.icon_ref, None)
+
+
+def open_settings(icon, item):
+    """Settings window in its own process; "Save & restart" restarts us."""
+    import threading
+    from . import ui_settings
+
+    def run():
+        proc = ui_settings.launch("--settings")
+        if proc.wait() == ui_settings.RESTART:
+            restart_app()
+    threading.Thread(target=run, daemon=True, name="settings-ui").start()
+
+
+def open_settings_folder(icon, item):
+    from . import ui_settings
+    ui_settings.open_folder(rt.SETTINGS_DIR)
+
+
+def open_extension(icon, item):
+    from . import ui_settings
+    webbrowser.open(ui_settings.EXTENSION_URL)
+
+
 def create_menu():
     # pystray re-evaluates callable labels each time the menu opens, so the Status
     # submenu always reflects live state. Items are display-only (enabled=False).
     status_menu = pystray.Menu(
         pystray.MenuItem(_status_source, None, enabled=False),
         pystray.MenuItem(_status_conn,   None, enabled=False),
+        pystray.MenuItem(f"Version: v{VERSION}", None, enabled=False),
     )
     return pystray.Menu(
         pystray.MenuItem(
@@ -204,7 +273,20 @@ def create_menu():
         pystray.MenuItem("📽 Open Letterboxd",  open_letterboxd),
         pystray.MenuItem("📺 Open Serializd",   open_serializd),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem(
+            lambda item: f"⬆ Install update v{updater.latest['version']}" if updater.latest else "",
+            _install_update,
+            visible=lambda item: updater.latest is not None,
+        ),
+        pystray.MenuItem("🔎 Check for updates", _check_updates),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("⚙ Settings...",          open_settings),
+        pystray.MenuItem("📁 Open settings folder", open_settings_folder),
+        pystray.MenuItem("🧩 Get browser extension", open_extension),
+        pystray.MenuItem("🚀 Start with Windows", toggle_autostart,
+                         checked=lambda item: autostart.is_enabled()),
         pystray.MenuItem("🖥 Toggle Console",   toggle_console),
+        pystray.MenuItem("🔁 Restart",          restart_app),
         pystray.MenuItem("❌ Quit",             quit_app)
     )
 

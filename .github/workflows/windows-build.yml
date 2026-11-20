@@ -1,0 +1,53 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to attach the exe to a release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (python -c "from mediarpc.version import VERSION; print(VERSION)").Trim()
+          "version=$v" >> $env:GITHUB_OUTPUT
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$v") {
+            throw "Tag ${{ github.ref_name }} does not match mediarpc/version.py ($v)"
+          }
+      - name: Build exe
+        shell: pwsh
+        env:
+          MEDIARPC_EXE_NAME: MediaRPC-${{ steps.ver.outputs.version }}
+        run: python -m PyInstaller --noconfirm --workpath build\work mediarpc/MediaRPC.spec
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          python -c "import mediarpc.updater as u; assert u.is_newer('v9.9.9'); assert not u.is_newer('v0.0.1')"
+          if (-not (Test-Path "dist/MediaRPC-${{ steps.ver.outputs.version }}.exe")) { throw "exe missing" }
+      - uses: actions/upload-artifact@v5
+        with:
+          name: MediaRPC-windows
+          path: dist/MediaRPC-*.exe
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: MediaRPC ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/MediaRPC-*.exe

@@ -10,7 +10,11 @@ from . import images
 from . import source_browser
 from . import source_emby
 from . import source_plezy
+from . import source_silage
 from . import tray
+from . import autostart
+from . import updater
+from .version import VERSION
 
 
 def validate_config():
@@ -41,6 +45,9 @@ def validate_config():
         for name in missing:
             rt.log(f"  ✗ {name}")
         rt.log("Fix these values and restart.")
+        from . import ui_settings
+        ui_settings.launch("--settings", "--start-after", "--message",
+                           "Fill in the required settings to start: " + ", ".join(missing))
         sys.exit(1)
 
     rt.log("Config OK:")
@@ -87,7 +94,7 @@ def _leave_clear():
 def _idle_tick():
     """Loop sleep: 2 s whenever a fast source could start at any moment (WS-fed
     Emby, Plezy's mpv pipe, the browser bridge); otherwise the HTTP poll interval."""
-    return 2 if (rt.ws_connected or rt.PLEZY_ENABLED or rt.BRIDGE_ENABLED) else rt.INTERVAL
+    return 2 if (rt.ws_connected or rt.PLEZY_ENABLED or rt.SILAGE_ENABLED or rt.BRIDGE_ENABLED) else rt.INTERVAL
 
 
 def rpc_loop():
@@ -102,7 +109,7 @@ def rpc_loop():
             continue
 
         try:
-            # ---- Priority: Emby (playing) > Plezy > Netflix > Emby (browsing) > idle ----
+            # ---- Priority: Emby (playing) > Plezy > Silage > Netflix > Emby (browsing) > idle ----
 
             # Emby auto-pause: when the local Emby app isn't running we skip Emby
             # entirely (both playing and browsing) so Plezy/Netflix can take over,
@@ -162,6 +169,22 @@ def rpc_loop():
                 continue
             if rt.last_mode == "plezy":
                 rt.log("Plezy activity ended - clearing presence")
+                _leave_clear()
+                rt.last_mode = None
+
+            # 2b. SILAGE (native Silo desktop app, via the Silo sessions API).
+            # Rendered by the browser bridge's Silo renderer, so it shares its timer state.
+            silage = source_silage.get_silage_activity()
+            if silage:
+                if rt.last_mode != "silage":
+                    rt.log("Switching to Silage activity")
+                    _leave_clear()
+                rt.last_mode = "silage"
+                source_browser.update_netflix_rpc(silage)
+                time.sleep(2)
+                continue
+            if rt.last_mode == "silage":
+                rt.log("Silage activity ended - clearing presence")
                 _leave_clear()
                 rt.last_mode = None
 
@@ -265,16 +288,9 @@ def _api_selftest():
 
 
 def main():
-    rt.log("Starting MediaRPC...")
+    rt.log(f"Starting MediaRPC v{VERSION}...")
 
-    if getattr(sys, 'frozen', False):
-        exe_dir     = os.path.dirname(sys.executable)
-        dotenv_path = os.path.join(exe_dir, '.env')
-        if os.path.exists(dotenv_path):
-            rt.log(f".env loaded from: {dotenv_path}")
-        else:
-            rt.log(f"WARNING: .env not found at: {dotenv_path}")
-            rt.log("Place .env file next to the exe!")
+    rt.log(f"Settings: {rt.dotenv_path}" + ("" if os.path.exists(rt.dotenv_path) else " (missing)"))
 
     # Validate required config - exits with a clear message if anything is missing
     validate_config()
@@ -324,6 +340,11 @@ def main():
     else:
         rt.log("Plezy source: DISABLED (via .env)")
 
+    if rt.SILAGE_ENABLED:
+        source_silage.silage_init()
+    else:
+        rt.log("Silage source: DISABLED (via .env)")
+
     # WebSocket thread - real-time session updates from Emby (only if Emby is on)
     if rt.EMBY_ENABLED and rt.WEBSOCKET_AVAILABLE:
         threading.Thread(target=source_emby.ws_loop, daemon=True, name="ws-loop").start()
@@ -334,6 +355,10 @@ def main():
         rt.log("WebSocket thread skipped (Emby source disabled)")
     else:
         rt.log("websocket-client not installed - falling back to HTTP polling only")
+
+    # Keep a Start-with-Windows entry pointing at this exe, then check for updates.
+    autostart.refresh()
+    threading.Thread(target=updater.check_loop, daemon=True, name="update-check").start()
 
     # Main RPC update loop
     threading.Thread(target=rpc_loop, daemon=True, name="rpc-loop").start()

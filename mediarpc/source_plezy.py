@@ -237,18 +237,81 @@ def _plezy_db_path():
     return None
 
 
-def _plezy_metadata_for_part(part_id):
-    """Resolve a Part id to its Plex metadata via Plezy's api_cache (cached per part)."""
+def _plezy_metadata_for_part(part_id, base=None, token=None):
+    """Resolve a Part id to its Plex metadata (cached per server + part).
+
+    Tries Plezy's local api_cache first, then asks the Plex server the stream
+    comes from. Plezy doesn't always populate api_cache (it stays empty for some
+    servers), so the server query is what usually resolves it. Misses are retried
+    on each mpv poll a few times, then backed off to PLEZY_PART_MISS_TTL."""
     if not part_id:
         return None
-    if part_id in rt.plezy_part_cache:
-        rt.plezy_part_cache.move_to_end(part_id)
-        return rt.plezy_part_cache[part_id]
-    # Negative cache: an unresolved part would otherwise re-copy Plezy's whole DB
-    # on every 3 s poll until Plezy writes the api_cache row.
-    missed_at = rt.plezy_part_miss.get(part_id)
-    if missed_at and time.time() - missed_at < rt.PLEZY_PART_MISS_TTL:
+    key = (base, part_id)
+    if key in rt.plezy_part_cache:
+        rt.plezy_part_cache.move_to_end(key)
+        return rt.plezy_part_cache[key]
+    miss = rt.plezy_part_miss.get(key)
+    if miss:
+        missed_at, attempts = miss
+        wait = rt.PLEZY_POLL_INTERVAL if attempts < rt.PLEZY_PART_FAST_RETRIES else rt.PLEZY_PART_MISS_TTL
+        if time.time() - missed_at < wait:
+            return None
+    meta = _plezy_api_cache_lookup(part_id) or _plex_server_lookup(base, token, part_id)
+    if meta:
+        if len(rt.plezy_part_cache) >= rt.CACHE_MAX_SIZE:
+            rt._evict_oldest(rt.plezy_part_cache)
+        rt.plezy_part_cache[key] = meta
+        rt.plezy_part_miss.pop(key, None)
+    else:
+        attempts = (miss[1] if miss else 0) + 1
+        if attempts == rt.PLEZY_PART_FAST_RETRIES:
+            rt.log(f"[Plex] part {part_id} unresolved after {attempts} tries; retrying every {rt.PLEZY_PART_MISS_TTL}s")
+        if len(rt.plezy_part_miss) >= rt.CACHE_MAX_SIZE:
+            rt._evict_oldest(rt.plezy_part_miss)
+        rt.plezy_part_miss[key] = (time.time(), attempts)
+    return meta
+
+
+def _plex_sections(base, token):
+    """[(section_key, plex_type)] for a server's movie/show libraries (cached)."""
+    now = time.time()
+    cached = rt.plezy_sections_cache.get(base)
+    if cached and now - cached[1] < rt.PLEZY_SECTIONS_TTL:
+        return cached[0]
+    r = rt.http.get(f"{base}/library/sections",
+                    headers={"Accept": "application/json", "X-Plex-Token": token}, timeout=8)
+    r.raise_for_status()
+    secs = [(d.get("key"), {"movie": 1, "show": 4}[d.get("type")])
+            for d in (r.json().get("MediaContainer", {}).get("Directory") or [])
+            if d.get("type") in ("movie", "show")]
+    rt.plezy_sections_cache[base] = (secs, now)
+    return secs
+
+
+def _plex_server_lookup(base, token, part_id):
+    """Ask the Plex server for the item owning this Part. Works with a shared
+    user's token (unlike /status/sessions, which needs the server owner)."""
+    if not (base and token and part_id):
         return None
+    hdrs = {"Accept": "application/json", "X-Plex-Token": token}
+    try:
+        for sec, ptype in _plex_sections(base, token):
+            r = rt.http.get(f"{base}/library/sections/{sec}/all",
+                            params={"type": ptype, "media.part.id": part_id},
+                            headers=hdrs, timeout=8)
+            if r.status_code != 200:
+                continue
+            for it in (r.json().get("MediaContainer", {}).get("Metadata") or []):
+                if any(str(pt.get("id")) == str(part_id)
+                       for md in (it.get("Media") or []) for pt in (md.get("Part") or [])):
+                    return it
+    except Exception as e:
+        rt.log(f"[Plex] server lookup for part {part_id} failed: {e}")
+    return None
+
+
+def _plezy_api_cache_lookup(part_id):
+    """Find the metadata item owning part_id in Plezy's local api_cache."""
     db = _plezy_db_path()
     if not db:
         return None
@@ -294,15 +357,6 @@ def _plezy_metadata_for_part(part_id):
             con.close()
     except Exception as e:
         rt.log(f"[Plex] api_cache lookup failed: {e}")
-    if meta:
-        if len(rt.plezy_part_cache) >= rt.CACHE_MAX_SIZE:
-            rt._evict_oldest(rt.plezy_part_cache)
-        rt.plezy_part_cache[part_id] = meta
-        rt.plezy_part_miss.pop(part_id, None)
-    else:
-        if len(rt.plezy_part_miss) >= rt.CACHE_MAX_SIZE:
-            rt._evict_oldest(rt.plezy_part_miss)
-        rt.plezy_part_miss[part_id] = time.time()
     return meta
 
 
@@ -413,7 +467,7 @@ def get_plezy_activity():
         rt.plezy_state["server_uri"] = base
         rt.plezy_state["server_token"] = token
 
-    md = _plezy_metadata_for_part(part) or {}
+    md = _plezy_metadata_for_part(part, base, token) or {}
     mtype = md.get("type")
     paused = bool(props.get("pause"))
     position = float(props.get("time-pos") or 0)
